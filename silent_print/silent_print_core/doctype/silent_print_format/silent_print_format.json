@@ -10,6 +10,9 @@
   "page_size",
   "custom_width",
   "custom_height",
+  "column_break_thermal",
+  "auto_height",
+  "crop_whitespace",
   "default_print_type"
  ],
  "fields": [
@@ -33,6 +36,7 @@
    "depends_on": "eval:doc.page_size==\"Custom\"",
    "fieldname": "custom_height",
    "fieldtype": "Data",
+   "description": "Ignored if Auto Height is enabled",
    "label": "Custom Page Height (in mm)"
   },
   {
@@ -44,6 +48,28 @@
    "options": "A0\nA1\nA2\nA3\nA4\nA5\nA6\nA7\nA8\nA9\nB0\nB1\nB2\nB3\nB4\nB5\nB6\nB7\nB8\nB9\nB10\nC5E\nComm10E\nDLE\nExecutive\nFolio\nLedger\nLegal\nLetter\nTabloid\nCustom"
   },
   {
+   "depends_on": "eval:doc.page_size==\"Custom\"",
+   "fieldname": "column_break_thermal",
+   "fieldtype": "Section Break",
+   "label": "Thermal Receipt Options"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.page_size==\"Custom\"",
+   "description": "Automatically calculate receipt height based on number of items. Recommended for thermal receipt printing.",
+   "fieldname": "auto_height",
+   "fieldtype": "Check",
+   "label": "Auto Height (Dynamic)"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.page_size==\"Custom\"",
+   "description": "Crop whitespace from bottom of receipt. Requires PyMuPDF (pip install pymupdf). Use as fallback if Auto Height is insufficient.",
+   "fieldname": "crop_whitespace",
+   "fieldtype": "Check",
+   "label": "Crop Whitespace"
+  },
+  {
    "description": "This is the label used to identify the printer in the Webapp Hardware Bridge",
    "fieldname": "default_print_type",
    "fieldtype": "Data",
@@ -51,7 +77,7 @@
   }
  ],
  "links": [],
- "modified": "2022-06-01 11:21:24.836495",
+ "modified": "2024-12-02 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Silent Print Core",
  "name": "Silent Print Format",
