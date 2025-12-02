@@ -35,7 +35,15 @@ def create_pdf(doctype, name, silent_print_format, doc=None, no_letterhead=0):
 def get_pdf_options(silent_print_format):
     options = {"page-size": silent_print_format.get("page_size") or "A4"}
     if silent_print_format.get("page_size") == "Custom":
-        options = {"page-width": silent_print_format.get("custom_width"), "page-height": silent_print_format.get("custom_height")}
+        options = {
+            "page-width": silent_print_format.get("custom_width"),
+            "page-height": silent_print_format.get("custom_height"),
+            # Set zero margins for thermal/receipt printing
+            "margin-top": "0mm",
+            "margin-bottom": "0mm",
+            "margin-left": "0mm",
+            "margin-right": "0mm",
+        }
     return options
 
 
@@ -124,11 +132,15 @@ def prepare_options(html, options):
         }
     )
 
+    # Only set default margins if not already specified (e.g., for thermal receipts)
     if not options.get("margin-right"):
         options["margin-right"] = "15mm"
-
     if not options.get("margin-left"):
         options["margin-left"] = "15mm"
+    if not options.get("margin-top"):
+        options["margin-top"] = "15mm"
+    if not options.get("margin-bottom"):
+        options["margin-bottom"] = "15mm"
 
     html, html_options = read_options_from_html(html)
     options.update(html_options or {})
