@@ -16,3 +16,7 @@ build-backend = "flit_core:buildapi"
 
 [tool.flit.module]
 name = "silent_print"
+
+[tool.bench.frappe-dependencies]
+frappe = ">=15.0.0,<16.0.0"
+erpnext = ">=15.0.0,<16.0.0"
