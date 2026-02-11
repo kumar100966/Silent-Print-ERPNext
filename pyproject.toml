@@ -1,0 +1,18 @@
+[project]
+name = "silent_print"
+authors = [
+    { name = "Roque Vera", email = "roquegv@gmail.com" }
+]
+description = "Silent print using https://github.com/imTigger/webapp-hardware-bridge"
+requires-python = ">=3.10"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = ["frappe"]
+license = { text = "MIT" }
+
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core:buildapi"
+
+[tool.flit.module]
+name = "silent_print"
