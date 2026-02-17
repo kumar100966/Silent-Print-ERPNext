@@ -22,6 +22,8 @@ RECEIPT_HEIGHT_CONFIG = {
 def calculate_receipt_height(doc):
     """
     Calculate the optimal receipt height based on document content.
+    Supports POS Invoice (items/payments), POS Closing Entry
+    (pos_transactions/payment_reconciliation/taxes), and other doctypes.
     Returns height in mm.
     """
     config = RECEIPT_HEIGHT_CONFIG
@@ -29,19 +31,31 @@ def calculate_receipt_height(doc):
     # Start with fixed sections
     height = config["header_height"] + config["customer_height"]
 
-    # Add item heights
-    items_count = len(doc.get("items", [])) if doc else 0
-    # Add extra height for items with discounts (they show an extra line)
-    items_with_discount = sum(1 for item in (doc.get("items", []) if doc else []) if item.get("discount_percentage"))
-    height += (items_count * config["item_height"]) + (items_with_discount * 2)
+    # Detect document type and count line items accordingly
+    items = (doc.get("items") or []) if doc else []
+    pos_transactions = (doc.get("pos_transactions") or []) if doc else []
+    taxes = (doc.get("taxes") or []) if doc else []
+    payment_recon = (doc.get("payment_reconciliation") or []) if doc else []
+    payments = (doc.get("payments") or []) if doc else []
+
+    if pos_transactions:
+        # POS Closing Entry: count transactions + tax lines + payment reconciliation rows
+        height += len(pos_transactions) * config["item_height"]
+        height += len(taxes) * config["payment_line_height"]
+        # Payment reconciliation table (header + rows)
+        if payment_recon:
+            height += config["payment_base_height"] + (len(payment_recon) * config["payment_line_height"])
+    else:
+        # POS Invoice / Sales Invoice: count items + payments
+        items_count = len(items)
+        items_with_discount = sum(1 for item in items if item.get("discount_percentage"))
+        height += (items_count * config["item_height"]) + (items_with_discount * 2)
+
+        if payments:
+            height += config["payment_base_height"] + (len(payments) * config["payment_line_height"])
 
     # Add totals section
     height += config["totals_height"]
-
-    # Add payment section if payments exist
-    payments_count = len(doc.get("payments", [])) if doc else 0
-    if payments_count > 0:
-        height += config["payment_base_height"] + (payments_count * config["payment_line_height"])
 
     # Add footer
     height += config["footer_height"]
