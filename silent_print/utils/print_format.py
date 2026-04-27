@@ -8,14 +8,14 @@ from frappe import _
 RECEIPT_HEIGHT_CONFIG = {
     "header_height": 10,  # Company name, address, receipt info
     "customer_height": 8,  # Customer info section
-    "item_height": 8,  # Height per item line (includes UOM, discount if any)
+    "item_height": 10,  # Height per item line (includes UOM, discount, word-wrap)
     "totals_height": 20,  # Subtotal, discount, tax, grand total
     "payment_base_height": 10,  # Payment section header
     "payment_line_height": 5,  # Per payment method
     "footer_height": 12,  # Thank you message
-    "buffer_height": 5,  # Extra buffer for safety
+    "buffer_height": 10,  # Extra buffer for safety
     "min_height": 60,  # Minimum receipt height
-    "max_height": 500,  # Maximum receipt height (prevents runaway)
+    "max_height": 3000,  # Thermal paper is continuous — no practical page limit
 }
 
 
@@ -47,9 +47,19 @@ def calculate_receipt_height(doc):
             height += config["payment_base_height"] + (len(payment_recon) * config["payment_line_height"])
     else:
         # POS Invoice / Sales Invoice: count items + payments
-        items_count = len(items)
-        items_with_discount = sum(1 for item in items if item.get("discount_percentage"))
-        height += (items_count * config["item_height"]) + (items_with_discount * 2)
+        # Account for word-wrap on long item names (~30 chars per line at 10px on 72mm)
+        item_height_total = 0
+        for item in items:
+            base = config["item_height"]
+            name_len = len(item.get("item_name") or "")
+            if name_len > 30:
+                # Add extra height for each wrapped line
+                extra_lines = (name_len - 1) // 30
+                base += extra_lines * 3.5
+            if item.get("discount_percentage") or item.get("discount_amount"):
+                base += 3  # Discount line
+            item_height_total += base
+        height += item_height_total
 
         if payments:
             height += config["payment_base_height"] + (len(payments) * config["payment_line_height"])
