@@ -5,17 +5,24 @@ from frappe import _
 
 
 # Height calculation constants for thermal receipts (in mm)
+# Must OVERESTIMATE — underestimates cause wkhtmltopdf pagination (visible gaps).
+# crop_whitespace (PyMuPDF) trims bottom excess, so overestimation is safe.
 RECEIPT_HEIGHT_CONFIG = {
-    "header_height": 10,  # Company name, address, receipt info
-    "customer_height": 8,  # Customer info section
-    "item_height": 10,  # Height per item line (includes UOM, discount, word-wrap)
-    "totals_height": 20,  # Subtotal, discount, tax, grand total
-    "payment_base_height": 10,  # Payment section header
-    "payment_line_height": 5,  # Per payment method
-    "footer_height": 12,  # Thank you message
-    "buffer_height": 10,  # Extra buffer for safety
-    "min_height": 60,  # Minimum receipt height
-    "max_height": 3000,  # Thermal paper is continuous — no practical page limit
+    "header_height": 35,       # Company name (multi-line), WhatsApp, Call, Visit, TIN, separator,
+                                # SALES RECEIPT bar, Receipt#, Date, Cashier, Sales Person
+    "customer_height": 8,      # Customer name + bottom border
+    "items_header_height": 8,  # Table header row (QTY ITEM PRICE AMT) + borders
+    "item_height": 14,         # Base height per item (name line + UOM + dotted border)
+    "chars_per_line": 20,      # ~20 chars fit in the ITEM column (not full 72mm width)
+    "item_wrap_line": 4,       # Extra mm per wrapped line of item name
+    "item_discount_height": 4, # Extra height for discount line
+    "totals_height": 25,       # Subtotal + discount + VAT + grand total with double borders
+    "payment_base_height": 10, # PAYMENT header + top border
+    "payment_line_height": 6,  # Per payment method line
+    "footer_height": 30,       # Thank you + pharmacy notice box + barcode + receipt-id + powered by
+    "buffer_height": 15,       # Safety margin (covers rendering variance)
+    "min_height": 100,         # Minimum receipt height
+    "max_height": 3000,        # Thermal paper is continuous — no practical page limit
 }
 
 
@@ -25,8 +32,12 @@ def calculate_receipt_height(doc):
     Supports POS Invoice (items/payments), POS Closing Entry
     (pos_transactions/payment_reconciliation/taxes), and other doctypes.
     Returns height in mm.
+
+    Intentionally overestimates — crop_whitespace (PyMuPDF) trims excess.
+    Underestimating causes wkhtmltopdf to paginate, creating visible gaps.
     """
     config = RECEIPT_HEIGHT_CONFIG
+    chars_per_line = config["chars_per_line"]
 
     # Start with fixed sections
     height = config["header_height"] + config["customer_height"]
@@ -47,17 +58,20 @@ def calculate_receipt_height(doc):
             height += config["payment_base_height"] + (len(payment_recon) * config["payment_line_height"])
     else:
         # POS Invoice / Sales Invoice: count items + payments
-        # Account for word-wrap on long item names (~30 chars per line at 10px on 72mm)
+        # Items table header row
+        height += config["items_header_height"]
+
+        # Per-item height with word-wrap estimation
+        # The ITEM column is ~30mm wide (~20 chars at 10px Courier on 72mm receipt)
         item_height_total = 0
         for item in items:
             base = config["item_height"]
             name_len = len(item.get("item_name") or "")
-            if name_len > 30:
-                # Add extra height for each wrapped line
-                extra_lines = (name_len - 1) // 30
-                base += extra_lines * 3.5
+            if name_len > chars_per_line:
+                extra_lines = (name_len - 1) // chars_per_line
+                base += extra_lines * config["item_wrap_line"]
             if item.get("discount_percentage") or item.get("discount_amount"):
-                base += 3  # Discount line
+                base += config["item_discount_height"]
             item_height_total += base
         height += item_height_total
 
@@ -97,11 +111,12 @@ def set_master_tab(tab_id):
 
 @frappe.whitelist()
 def create_pdf(doctype, name, silent_print_format, doc=None, no_letterhead=0):
-    html = frappe.get_print(doctype, name, silent_print_format, doc=doc, no_letterhead=no_letterhead)
     if not frappe.db.exists("Silent Print Format", silent_print_format):
         return
 
     silent_print_format_doc = frappe.get_doc("Silent Print Format", silent_print_format)
+
+    html = frappe.get_print(doctype, name, silent_print_format, doc=doc, no_letterhead=no_letterhead)
 
     # Load the actual document for height calculation if auto_height is enabled
     actual_doc = None
@@ -114,12 +129,152 @@ def create_pdf(doctype, name, silent_print_format, doc=None, no_letterhead=0):
     options = get_pdf_options(silent_print_format_doc, actual_doc)
     pdf = get_pdf(html, options=options)
 
-    # Optionally crop the PDF to remove whitespace
-    if silent_print_format_doc.get("crop_whitespace"):
-        pdf = crop_pdf_whitespace(pdf)
+    print_type = silent_print_format_doc.default_print_type
 
+    # For thermal receipts: convert PDF → ESC/POS raw bytes for direct printing.
+    # This bypasses the Windows print spooler entirely, so the printer feeds
+    # exactly as much paper as the content needs (true auto-height).
+    #
+    # pdf_to_escpos handles bottom whitespace trimming at the bitmap level
+    # (no PDF structure modifications needed). This avoids MediaBox/CropBox
+    # issues that caused header truncation with crop_pdf_whitespace.
+    #
+    # Size limit: WHB sends ESC/POS as a base64 JSON payload over WebSocket.
+    # Java WebSocket implementations have message size limits (often 64-256 KB).
+    # Large receipts exceed this. Fall back to PDF mode (uncropped) for those.
+    MAX_RAW_BASE64_BYTES = 500_000  # ~500 KB — raised after fixing bitmap-level trim
+    if print_type == "pos printer":
+        try:
+            raw_bytes = pdf_to_escpos(pdf)
+            raw_base64 = base64.b64encode(raw_bytes).decode()
+            if len(raw_base64) <= MAX_RAW_BASE64_BYTES:
+                return {"raw_base64": raw_base64, "print_type": print_type}
+            else:
+                frappe.logger().info(
+                    f"[SilentPrint] ESC/POS data too large ({len(raw_base64)} bytes > {MAX_RAW_BASE64_BYTES}), "
+                    f"falling back to PDF for {doctype} {name}"
+                )
+        except Exception as e:
+            frappe.log_error(
+                title="ESC/POS Conversion Error",
+                message=f"Falling back to PDF mode: {str(e)}\n{frappe.get_traceback()}",
+            )
+            # Fall through to PDF mode
+
+    # PDF fallback: use the ORIGINAL uncropped PDF — WHB handles it correctly
     pdf_base64 = base64.b64encode(pdf)
-    return {"pdf_base64": pdf_base64.decode(), "print_type": silent_print_format_doc.default_print_type}
+    return {"pdf_base64": pdf_base64.decode(), "print_type": print_type}
+
+
+def pdf_to_escpos(pdf_bytes, dpi=203):
+    """
+    Convert a PDF to ESC/POS raster commands for direct thermal printing.
+
+    Renders the PDF page as a monochrome bitmap at the printer's native DPI,
+    then wraps it in ESC/POS GS v 0 (raster bit image) commands.
+    This bypasses the Windows print spooler — the printer feeds exactly
+    as much paper as the content requires (true auto-height).
+
+    Bottom whitespace is trimmed at the bitmap level — no PDF structure
+    modifications (MediaBox/CropBox) needed. This avoids coordinate issues
+    that can cause header truncation on some PDF generators.
+
+    The raster is sent in bands of MAX_BAND_HEIGHT rows to stay within
+    printer buffer limits.
+
+    Args:
+        pdf_bytes: Raw PDF file bytes
+        dpi: Printer resolution (203 DPI is standard for 80mm thermal)
+
+    Returns:
+        bytes: Complete ESC/POS command sequence ready to send to printer
+    """
+    import fitz  # PyMuPDF
+
+    MAX_BAND_HEIGHT = 255
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = doc[0]
+
+    # Render at printer's native DPI, grayscale
+    pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+    width = pix.width
+    height = pix.height
+    stride = pix.stride
+    samples = pix.samples
+
+    doc.close()
+
+    # --- Bitmap-level bottom whitespace trimming ---
+    # Scan from bottom to find last row with any non-white pixel.
+    # This replaces PDF-level cropping (crop_pdf_whitespace) which
+    # modified MediaBox/CropBox and caused header truncation issues.
+    last_content_row = height - 1
+    for y in range(height - 1, -1, -1):
+        row_start = y * stride
+        row = samples[row_start : row_start + width]
+        if min(row) < 250:  # Any pixel darker than near-white
+            last_content_row = y
+            break
+
+    # Content height = everything from row 0 (top/header) to last content
+    # row, plus a small buffer (~2mm at 203 DPI = 16 pixels)
+    content_height = min(height, last_content_row + 16)
+    trimmed_rows = height - content_height
+
+    if trimmed_rows > 0:
+        frappe.logger().info(
+            f"[ESC/POS] Bitmap {width}x{height}px, content ends at row {last_content_row}, "
+            f"trimmed {trimmed_rows} blank rows from bottom → {content_height}px"
+        )
+
+    # Convert grayscale to 1-bit monochrome (threshold at 128)
+    # Each byte = 8 pixels, MSB first, 1=black 0=white
+    # Only process rows 0..content_height (skip bottom whitespace)
+    byte_width = (width + 7) // 8
+    raster = bytearray(byte_width * content_height)
+
+    for y in range(content_height):
+        row_offset = y * stride
+        out_offset = y * byte_width
+        for x in range(width):
+            if samples[row_offset + x] < 128:  # Dark pixel
+                raster[out_offset + (x >> 3)] |= (0x80 >> (x & 7))
+
+    # Build ESC/POS command sequence
+    escpos = bytearray()
+
+    # 1. Initialize printer
+    escpos.extend(b'\x1B\x40')  # ESC @ — reset printer
+
+    # 2. Print raster in bands to avoid printer buffer overflow.
+    #    Each band is a separate GS v 0 command.
+    #    Format: 1D 76 30 m xL xH yL yH d1...dk
+    #    m=0 (normal), xL/xH = bytes per row, yL/yH = number of rows
+    rows_sent = 0
+    while rows_sent < content_height:
+        band_height = min(MAX_BAND_HEIGHT, content_height - rows_sent)
+
+        escpos.extend(b'\x1D\x76\x30\x00')  # GS v 0, mode=0 (normal)
+        escpos.append(byte_width & 0xFF)             # xL
+        escpos.append((byte_width >> 8) & 0xFF)      # xH
+        escpos.append(band_height & 0xFF)             # yL
+        escpos.append((band_height >> 8) & 0xFF)      # yH
+
+        # Slice the raster data for this band
+        band_start = rows_sent * byte_width
+        band_end = (rows_sent + band_height) * byte_width
+        escpos.extend(raster[band_start:band_end])
+
+        rows_sent += band_height
+
+    # 3. Feed a few lines after content for readability
+    escpos.extend(b'\x1B\x64\x04')  # ESC d 4 — feed 4 lines
+
+    # 4. Partial cut (leave a small strip attached)
+    escpos.extend(b'\x1D\x56\x42\x00')  # GS V 66 0 — partial cut
+
+    return bytes(escpos)
 
 
 def get_pdf_options(silent_print_format, doc=None):
@@ -165,61 +320,91 @@ def get_pdf_options(silent_print_format, doc=None):
 
 def crop_pdf_whitespace(pdf_bytes):
     """
-    Crop whitespace from the bottom of a PDF.
-    Requires PyMuPDF (fitz) to be installed.
-    Falls back to original PDF if cropping fails.
+    Crop bottom whitespace from thermal receipt PDFs.
+    Uses pixel-based detection (renders as grayscale image) to find the last
+    visible content row, then trims the page height down to content + small buffer.
+    Preserves the top of the page as-is (avoids MediaBox origin changes that
+    confuse some thermal printer pipelines).
+    Falls back to original PDF on failure.
     """
     try:
         import fitz  # PyMuPDF
+    except ImportError:
+        frappe.log_error(title="Silent Print Crop Error", message="PyMuPDF (fitz) not installed. PDF cropping disabled.")
+        return pdf_bytes
 
-        # Open PDF from bytes
-        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        for page_num in range(len(pdf_doc)):
-            page = pdf_doc[page_num]
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            rect = page.rect
 
-            # Get the bounding box of all content on the page
-            # This finds the actual content boundaries
-            blocks = page.get_text("dict")["blocks"]
+            # Render page as grayscale at 150 DPI for reliable text detection
+            pix = page.get_pixmap(dpi=150, colorspace=fitz.csGRAY)
+            w, h = pix.width, pix.height
+            stride = pix.stride
+            samples = pix.samples  # 1 byte per pixel, grayscale
 
-            if not blocks:
+            scale_y = rect.height / h if h > 0 else 1
+
+            # Scan from bottom: find last row with any non-white pixel
+            last_row = None
+            for y in range(h - 1, -1, -1):
+                row = samples[y * stride : y * stride + w]
+                if min(row) < 250:
+                    last_row = y
+                    break
+
+            if last_row is None:
+                frappe.log_error(
+                    title="Silent Print Crop Debug",
+                    message=f"Page {page_num}: NO content detected (h={h}px)",
+                )
                 continue
 
-            # Find the lowest point of actual content
-            max_y = 0
-            for block in blocks:
-                if "bbox" in block:
-                    max_y = max(max_y, block["bbox"][3])
-                elif "lines" in block:
-                    for line in block["lines"]:
-                        if "bbox" in line:
-                            max_y = max(max_y, line["bbox"][3])
+            # Convert pixel row to PDF points
+            content_bottom = (last_row + 1) * scale_y + rect.y0
+            bottom_ws = rect.y1 - content_bottom
 
-            if max_y > 0:
-                # Add a small buffer (5 points ~ 1.7mm)
-                max_y += 15
+            # Only crop if bottom whitespace exceeds 3mm (~8.5pt)
+            if bottom_ws <= 8.5:
+                continue
 
-                # Get current page dimensions
-                rect = page.rect
+            # Keep page origin (y0) unchanged — only reduce y1 (bottom edge)
+            # 5pt (~1.8mm) buffer below last content pixel
+            crop_y1 = min(rect.y1, content_bottom + 5)
+            crop_rect = fitz.Rect(rect.x0, rect.y0, rect.x1, crop_y1)
 
-                # Only crop if there's significant whitespace (more than 20 points)
-                if rect.height - max_y > 20:
-                    # Create new crop box
-                    new_rect = fitz.Rect(rect.x0, rect.y0, rect.x1, max_y)
-                    page.set_cropbox(new_rect)
+            page.set_mediabox(crop_rect)
+            # CropBox inherits from MediaBox when not set explicitly.
+            # Calling set_cropbox after set_mediabox can raise
+            # "CropBox not in MediaBox" on some PyMuPDF versions, so
+            # just delete any existing CropBox entry and let it inherit.
+            try:
+                page.set_cropbox(crop_rect)
+            except ValueError:
+                # CropBox validation failed — remove it so it defaults to MediaBox
+                xref = page.xref
+                doc.xref_set_key(xref, "CropBox", "null")
 
-        # Save to bytes
-        output = pdf_doc.tobytes()
-        pdf_doc.close()
+            cropped_mm = crop_rect.height / 2.835
+            original_mm = rect.height / 2.835
+            trimmed_mm = original_mm - cropped_mm
+            frappe.log_error(
+                title="Silent Print Crop Debug",
+                message=f"Page {page_num}: {original_mm:.0f}mm -> {cropped_mm:.0f}mm (trimmed {trimmed_mm:.0f}mm bottom)",
+            )
+
+        output = doc.tobytes()
+        doc.close()
         return output
 
-    except ImportError:
-        # PyMuPDF not installed, return original
-        frappe.log_error("PyMuPDF (fitz) not installed. PDF cropping disabled.", "Silent Print")
-        return pdf_bytes
     except Exception as e:
-        # Any other error, return original
-        frappe.log_error(f"PDF cropping failed: {str(e)}", "Silent Print")
+        frappe.log_error(
+            title="Silent Print Crop Error",
+            message=f"PDF cropping FAILED: {str(e)}\n{frappe.get_traceback()}",
+        )
         return pdf_bytes
 
 
