@@ -7,7 +7,10 @@ description = "Silent print using https://github.com/imTigger/webapp-hardware-br
 requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
-dependencies = ["frappe"]
+dependencies = [
+    "frappe",
+    "PyMuPDF>=1.23.0",
+]
 license = { text = "MIT" }
 
 [build-system]
