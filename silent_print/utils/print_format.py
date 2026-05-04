@@ -205,6 +205,17 @@ def pdf_to_escpos(pdf_bytes, dpi=203):
 
     doc.close()
 
+    # --- Bitmap-level top whitespace trimming ---
+    # Scan from top to find first row with any non-white pixel.
+    # Handles wkhtmltopdf version differences that add top margin/padding.
+    first_content_row = 0
+    for y in range(height):
+        row_start = y * stride
+        row = samples[row_start : row_start + width]
+        if min(row) < 250:  # Any pixel darker than near-white
+            first_content_row = y
+            break
+
     # --- Bitmap-level bottom whitespace trimming ---
     # Scan from bottom to find last row with any non-white pixel.
     # This replaces PDF-level cropping (crop_pdf_whitespace) which
@@ -217,25 +228,27 @@ def pdf_to_escpos(pdf_bytes, dpi=203):
             last_content_row = y
             break
 
-    # Content height = everything from row 0 (top/header) to last content
-    # row, plus a small buffer (~2mm at 203 DPI = 16 pixels)
-    content_height = min(height, last_content_row + 16)
-    trimmed_rows = height - content_height
+    # Content = first_content_row..last_content_row + small buffer
+    # Bottom buffer: ~2mm at 203 DPI = 16 pixels
+    content_end = min(height, last_content_row + 16)
+    content_height = content_end - first_content_row
+    top_trimmed = first_content_row
+    bottom_trimmed = height - content_end
 
-    if trimmed_rows > 0:
+    if top_trimmed > 0 or bottom_trimmed > 0:
         frappe.logger().info(
-            f"[ESC/POS] Bitmap {width}x{height}px, content ends at row {last_content_row}, "
-            f"trimmed {trimmed_rows} blank rows from bottom → {content_height}px"
+            f"[ESC/POS] Bitmap {width}x{height}px, content rows {first_content_row}..{last_content_row}, "
+            f"trimmed {top_trimmed}px top + {bottom_trimmed}px bottom → {content_height}px"
         )
 
     # Convert grayscale to 1-bit monochrome (threshold at 128)
     # Each byte = 8 pixels, MSB first, 1=black 0=white
-    # Only process rows 0..content_height (skip bottom whitespace)
+    # Only process rows first_content_row..content_end (skip top+bottom whitespace)
     byte_width = (width + 7) // 8
     raster = bytearray(byte_width * content_height)
 
     for y in range(content_height):
-        row_offset = y * stride
+        row_offset = (y + first_content_row) * stride
         out_offset = y * byte_width
         for x in range(width):
             if samples[row_offset + x] < 128:  # Dark pixel
